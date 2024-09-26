@@ -1,1 +1,1 @@
-"# Do_an_da_nganh" 
+docker compose up -d --wait   
