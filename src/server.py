@@ -3,6 +3,7 @@ import sqlite3
 import zlib  
 import threading
 import time
+from MultiSensorDataGrouper import MultiSensorDataGrouper  
 from confluent_kafka import Consumer, KafkaException, KafkaError
 
 
@@ -23,6 +24,13 @@ class DataProcessor:
 
         # Initialize DB table
         self._initialize_db()
+        
+        self.file_path = 'data_test.txt'
+        self.epsilon = 2.0
+        self.grouper = MultiSensorDataGrouper(epsilon=self.epsilon, window_size=100)
+        
+        self.base_moteid = 1  # Use moteid 1 as the base
+        self.attribute = 'temperature'  # Attribute to analyze
 
     def _initialize_db(self):
         # Create a table for original, compressed, and decompressed data
@@ -36,7 +44,6 @@ class DataProcessor:
             )
         ''')
         self.conn.commit()
-
     def compress_data(self, data):
         # Convert data to string and compress it
         data_str = json.dumps(data)
@@ -48,6 +55,9 @@ class DataProcessor:
         return json.loads(decompressed_data)
 
     def consume_messages(self):
+        last_written_time = time.time()  # Keep track of the last time data was written
+        file_path = 'data_test.txt'  # Path to the file where data will be stored
+        
         try:
             while True:
                 msg = self.consumer.poll(timeout=1.0)
@@ -61,6 +71,7 @@ class DataProcessor:
                         raise KafkaException(msg.error())
                 else:
                     try:
+                        # Decode the message and append to the buffer
                         message_value = msg.value().decode('utf-8')
                         data = json.loads(message_value)
 
@@ -70,11 +81,55 @@ class DataProcessor:
                     except json.JSONDecodeError:
                         print(f"Received non-JSON message: {msg.value().decode('utf-8')}")
 
+                # Check if one second has passed since the last file write
+                current_time = time.time()
+                if current_time - last_written_time >= 1:
+                    with self.data_lock:
+                        if self.data_buffer:
+                            # Write data to the file in CSV-compatible format
+                            with open(self.file_path, 'a') as f:
+                                for data in self.data_buffer:
+                                    # Ensure the fields are written as space-separated values
+                                    f.write(f"{data['date']} {data['time']} {data['epoch']} "
+                                            f"{data['moteid']} {data['temperature']} "
+                                            f"{data['humidity']} {data['light']} {data['voltage']}\n")
+                            # Clear the buffer after writing
+                            self.data_buffer.clear()
+
+                        # Update the last written time
+                        last_written_time = current_time
+
         except KeyboardInterrupt:
             pass  # Clean exit on Ctrl+C
         finally:
             self.consumer.close()
 
+    # def compress_decompress_and_store(self):
+    #     while True:
+    #         time.sleep(1)  # Wait for 1 second
+
+    #         with self.data_lock:
+    #             if self.data_buffer:
+    #                 for data in self.data_buffer:
+    #                     timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+                        
+    #                     df = MultiSensorDataGrouper.load_data(self.file_path)
+    #                     # Compress and decompress data
+    #                     base_signal, other_signals, timestamps = self.grouper.extract_signals(df, self.base_moteid, self.attribute)
+    #                     base_signals, ratio_signals, total_memory_cost = self.grouper.static_group(df, self.base_moteid, self.attribute)
+    #                     # decompressed_data = self.decompress_data(compressed_data)
+    #                     reconstructed_base_signal = self.grouper.reconstruct_signal(base_signals[0][1])
+
+    #                     # Insert into the database
+    #                     self.cursor.execute('''
+    #                         INSERT INTO data_comparison (timestamp, original_data, compressed_data, decompressed_data)
+    #                         VALUES (?, ?, ?, ?)
+    #                     ''', (timestamp, json.dumps(data), compressed_data, json.dumps(decompressed_data)))
+    #                     self.conn.commit()
+                    
+    #                 # Clear the buffer after storing
+    #                 self.data_buffer.clear()
+    
     def compress_decompress_and_store(self):
         while True:
             time.sleep(1)  # Wait for 1 second
