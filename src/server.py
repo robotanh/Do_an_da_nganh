@@ -3,7 +3,7 @@ import sqlite3
 import zlib  
 import threading
 import time
-from MultiSensorDataGrouper import MultiSensorDataGrouper  
+from MultiSensorDataGrouper import MultiSensorDataGrouper  , load_data
 from confluent_kafka import Consumer, KafkaException, KafkaError
 
 
@@ -26,11 +26,11 @@ class DataProcessor:
         self._initialize_db()
         
         self.file_path = 'data_test.txt'
-        self.epsilon = 2.0
+        self.epsilon = 0.5
         self.grouper = MultiSensorDataGrouper(epsilon=self.epsilon, window_size=100)
         
         self.base_moteid = 1  # Use moteid 1 as the base
-        self.attribute = 'temperature'  # Attribute to analyze
+        self.attribute = 'humidity'  # Attribute to analyze
 
     def _initialize_db(self):
         # Create a table for original, compressed, and decompressed data
@@ -56,7 +56,6 @@ class DataProcessor:
 
     def consume_messages(self):
         last_written_time = time.time()  # Keep track of the last time data was written
-        file_path = 'data_test.txt'  # Path to the file where data will be stored
         
         try:
             while True:
@@ -104,6 +103,38 @@ class DataProcessor:
         finally:
             self.consumer.close()
 
+    def compress_decompress_and_store(self):
+        while True:
+            time.sleep(1)  # Wait for 1 second
+
+            with self.data_lock:
+                timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+                
+                df = load_data(self.file_path)
+                # Compress and decompress data
+                base_signal, other_signals, timestamps = self.grouper.extract_signals(df, self.base_moteid, self.attribute)
+                base_signals, ratio_signals, total_memory_cost = self.grouper.static_group(df, self.base_moteid, self.attribute)
+                # decompressed_data = self.decompress_data(compressed_data)
+                reconstructed_base_signal = self.grouper.reconstruct_signal(base_signals[0][1])
+                
+                # Reconstruct the other signals from their ratio buckets
+                reconstructed_other_signals = []
+                for moteid, ratio_buckets in ratio_signals.items():
+                    reconstructed_signal = self.grouper.reconstruct_signal(ratio_buckets, base_signal)
+                    reconstructed_other_signals.append(reconstructed_signal)
+
+                # Step 4: Plot original vs reconstructed signals
+
+                # Combine the base signal and other signals into one list for plotting
+                original_signals = [base_signal] + other_signals
+                reconstructed_signals = [reconstructed_base_signal] + reconstructed_other_signals
+                
+                print(f'Total memory cost after compression: {total_memory_cost} buckets')
+                
+                self.grouper.plot_signals_single(original_signals, reconstructed_signals)
+
+
+    
     # def compress_decompress_and_store(self):
     #     while True:
     #         time.sleep(1)  # Wait for 1 second
@@ -113,12 +144,9 @@ class DataProcessor:
     #                 for data in self.data_buffer:
     #                     timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
                         
-    #                     df = MultiSensorDataGrouper.load_data(self.file_path)
     #                     # Compress and decompress data
-    #                     base_signal, other_signals, timestamps = self.grouper.extract_signals(df, self.base_moteid, self.attribute)
-    #                     base_signals, ratio_signals, total_memory_cost = self.grouper.static_group(df, self.base_moteid, self.attribute)
-    #                     # decompressed_data = self.decompress_data(compressed_data)
-    #                     reconstructed_base_signal = self.grouper.reconstruct_signal(base_signals[0][1])
+    #                     compressed_data = self.compress_data(data)
+    #                     decompressed_data = self.decompress_data(compressed_data)
 
     #                     # Insert into the database
     #                     self.cursor.execute('''
@@ -129,29 +157,6 @@ class DataProcessor:
                     
     #                 # Clear the buffer after storing
     #                 self.data_buffer.clear()
-    
-    def compress_decompress_and_store(self):
-        while True:
-            time.sleep(1)  # Wait for 1 second
-
-            with self.data_lock:
-                if self.data_buffer:
-                    for data in self.data_buffer:
-                        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-                        
-                        # Compress and decompress data
-                        compressed_data = self.compress_data(data)
-                        decompressed_data = self.decompress_data(compressed_data)
-
-                        # Insert into the database
-                        self.cursor.execute('''
-                            INSERT INTO data_comparison (timestamp, original_data, compressed_data, decompressed_data)
-                            VALUES (?, ?, ?, ?)
-                        ''', (timestamp, json.dumps(data), compressed_data, json.dumps(decompressed_data)))
-                        self.conn.commit()
-                    
-                    # Clear the buffer after storing
-                    self.data_buffer.clear()
 
     def start(self):
         # Create and start the consumer thread
