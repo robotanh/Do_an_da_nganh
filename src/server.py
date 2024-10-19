@@ -1,10 +1,11 @@
 import json
-import sqlite3
-import zlib  
 import threading
 import time
 from MultiSensorDataGrouper import MultiSensorDataGrouper  , load_data
 from confluent_kafka import Consumer, KafkaException, KafkaError
+import os
+import numpy as np
+
 
 
 class DataProcessor:
@@ -14,45 +15,26 @@ class DataProcessor:
         self.consumer = Consumer(self.kafka_config)
         self.consumer.subscribe([self.topic])
         
-        # SQLite connection
-        self.conn = sqlite3.connect(db_path)
-        self.cursor = self.conn.cursor()
 
         # Shared buffer for holding data between threads
         self.data_buffer = []
         self.data_lock = threading.Lock()
-
-        # Initialize DB table
-        self._initialize_db()
-        
+ 
         self.file_path = 'data_test.txt'
-        self.epsilon = 0.5
+        self.epsilon = 2
         self.grouper = MultiSensorDataGrouper(epsilon=self.epsilon, window_size=100)
         
         self.base_moteid = 1  # Use moteid 1 as the base
-        self.attribute = 'humidity'  # Attribute to analyze
-
-    def _initialize_db(self):
-        # Create a table for original, compressed, and decompressed data
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS data_comparison (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT,
-                original_data TEXT,  -- Original data in JSON format
-                compressed_data BLOB,  -- Compressed data as BLOB
-                decompressed_data TEXT  -- Decompressed data in JSON format
-            )
-        ''')
-        self.conn.commit()
-    def compress_data(self, data):
-        # Convert data to string and compress it
-        data_str = json.dumps(data)
-        compressed_data = zlib.compress(data_str.encode('utf-8'))
-        return compressed_data
-
-    def decompress_data(self, compressed_data):
-        decompressed_data = zlib.decompress(compressed_data).decode('utf-8')
-        return json.loads(decompressed_data)
+        self.attribute = ['temperature','humidity','light','voltage' ] # Attribute to analyze
+        
+        self.all_original_signals_temperature = [] 
+        self.all_reconstructed_signals_temperature = [] 
+        self.all_original_signals_humidity = [] 
+        self.all_reconstructed_signals_humidity = [] 
+        self.all_original_signals_light= [] 
+        self.all_reconstructed_signals_light = [] 
+        self.all_original_signals_voltage = [] 
+        self.all_reconstructed_signals_voltage = [] 
 
     def consume_messages(self):
         last_written_time = time.time()  # Keep track of the last time data was written
@@ -107,56 +89,87 @@ class DataProcessor:
         while True:
             time.sleep(1)  # Wait for 1 second
 
+            if os.path.getsize(self.file_path) == 0:
+                print(f"File {self.file_path} is empty. Skipping processing...")
+                continue
+
             with self.data_lock:
                 timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-                
                 df = load_data(self.file_path)
-                # Compress and decompress data
-                base_signal, other_signals, timestamps = self.grouper.extract_signals(df, self.base_moteid, self.attribute)
-                base_signals, ratio_signals, total_memory_cost = self.grouper.static_group(df, self.base_moteid, self.attribute)
-                # decompressed_data = self.decompress_data(compressed_data)
-                reconstructed_base_signal = self.grouper.reconstruct_signal(base_signals[0][1])
-                
-                # Reconstruct the other signals from their ratio buckets
-                reconstructed_other_signals = []
-                for moteid, ratio_buckets in ratio_signals.items():
-                    reconstructed_signal = self.grouper.reconstruct_signal(ratio_buckets, base_signal)
-                    reconstructed_other_signals.append(reconstructed_signal)
 
-                # Step 4: Plot original vs reconstructed signals
+                for attr in self.attribute:
+                    # Compress and decompress data for each attribute
+                    base_signal, other_signals, timestamps = self.grouper.extract_signals(df, self.base_moteid, attr)
+                    # Step 2: Perform static grouping to get compression buckets
+                    base_signals, ratio_signals, total_memory_cost = self.grouper.static_group(df, self.base_moteid, attr)
+                    reconstructed_base_signal = self.grouper.reconstruct_signal(base_signals[0][1])
 
-                # Combine the base signal and other signals into one list for plotting
-                original_signals = [base_signal] + other_signals
-                reconstructed_signals = [reconstructed_base_signal] + reconstructed_other_signals
-                
-                print(f'Total memory cost after compression: {total_memory_cost} buckets')
-                
-                self.grouper.plot_signals_single(original_signals, reconstructed_signals)
+                    # Step 3: Reconstruct the compressed signals
+                    # Reconstruct the base signal from its compressed buckets
+                    reconstructed_other_signals = []
+                    for moteid, ratio_buckets in ratio_signals.items():
+                        reconstructed_signal = self.grouper.reconstruct_signal(ratio_buckets, base_signal)
+                        reconstructed_other_signals.append(reconstructed_signal)
+
+                    # Combine the base signal and other signals into one list for plotting
+                    original_signals = [base_signal] + other_signals
+                    reconstructed_signals = [reconstructed_base_signal] + reconstructed_other_signals
+
+                    # Check if the list is initialized and handle concatenation
+                    all_original_signals = getattr(self, f"all_original_signals_{attr}")
+                    all_reconstructed_signals = getattr(self, f"all_reconstructed_signals_{attr}")
+
+                    # Concatenate only if lists are non-empty, else assign the first values
+                    if all_original_signals:
+                        concatenated_original = [
+                            np.concatenate((existing, new)) for existing, new in zip(all_original_signals, original_signals)
+                        ]
+                        setattr(self, f"all_original_signals_{attr}", concatenated_original)
+                    else:
+                        setattr(self, f"all_original_signals_{attr}", original_signals)
+
+                    if all_reconstructed_signals:
+                        concatenated_reconstructed = [
+                            np.concatenate((existing, new)) for existing, new in zip(all_reconstructed_signals, reconstructed_signals)
+                        ]
+                        setattr(self, f"all_reconstructed_signals_{attr}", concatenated_reconstructed)
+                    else:
+                        setattr(self, f"all_reconstructed_signals_{attr}", reconstructed_signals)
+
+                    # Debugging Prints
+                    print(f"original_signals for {attr}: {original_signals}\n")
+                    print(f"reconstructed_signals for {attr}: {reconstructed_signals}\n")
+                    print(f'Concatenated all original_signals for {attr}: {getattr(self, f"all_original_signals_{attr}")}')
+                    print(f'Concatenated all reconstructed_signals for {attr}: {getattr(self, f"all_reconstructed_signals_{attr}")}')
+                    print(f'Total memory cost after compression for {attr}: {total_memory_cost} buckets')
+
+                    # Step 4: Plot original vs reconstructed signals
+                    self.grouper.plot_signals_single(original_signals, reconstructed_signals)
 
 
-    
-    # def compress_decompress_and_store(self):
-    #     while True:
-    #         time.sleep(1)  # Wait for 1 second
+                self.plot_all_signals()
 
-    #         with self.data_lock:
-    #             if self.data_buffer:
-    #                 for data in self.data_buffer:
-    #                     timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-                        
-    #                     # Compress and decompress data
-    #                     compressed_data = self.compress_data(data)
-    #                     decompressed_data = self.decompress_data(compressed_data)
 
-    #                     # Insert into the database
-    #                     self.cursor.execute('''
-    #                         INSERT INTO data_comparison (timestamp, original_data, compressed_data, decompressed_data)
-    #                         VALUES (?, ?, ?, ?)
-    #                     ''', (timestamp, json.dumps(data), compressed_data, json.dumps(decompressed_data)))
-    #                     self.conn.commit()
-                    
-    #                 # Clear the buffer after storing
-    #                 self.data_buffer.clear()
+            with open(self.file_path, 'w'):
+                pass 
+
+
+
+
+    def plot_all_signals(self):
+        # Loop through each attribute and plot all accumulated signals for each attribute
+        for attr in self.attribute:
+            # Retrieve the accumulated original and reconstructed signals for the current attribute
+            all_original_signals = getattr(self, f"all_original_signals_{attr}", None)
+            all_reconstructed_signals = getattr(self, f"all_reconstructed_signals_{attr}", None)
+
+            if all_original_signals is not None and all_reconstructed_signals is not None:
+                print(f"Plotting concatenated signals for {attr}...")
+                # Plot the concatenated signals
+                self.grouper.plot_signals_single(all_original_signals, all_reconstructed_signals)
+            else:
+                print(f"No concatenated signals found for {attr}")
+
 
     def start(self):
         # Create and start the consumer thread
@@ -170,7 +183,6 @@ class DataProcessor:
         consumer_thread.join()
 
     def __del__(self):
-        # Clean up SQLite connection
         self.conn.close()
 
 
