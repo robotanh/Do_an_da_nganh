@@ -9,7 +9,7 @@ import numpy as np
 
 
 class DataProcessor:
-    def __init__(self, kafka_config, db_path, topic):
+    def __init__(self, kafka_config, db_path, topic,time_consume_data_buffer):
         self.kafka_config = kafka_config
         self.topic = topic
         self.consumer = Consumer(self.kafka_config)
@@ -26,6 +26,8 @@ class DataProcessor:
         
         self.base_moteid = 1  # Use moteid 1 as the base
         self.attribute = ['temperature','humidity','light','voltage' ] # Attribute to analyze
+        
+        self.time_consume_data_buffer = time_consume_data_buffer
         
         self.all_original_signals_temperature = [] 
         self.all_reconstructed_signals_temperature = [] 
@@ -64,7 +66,7 @@ class DataProcessor:
 
                 # Check if one second has passed since the last file write
                 current_time = time.time()
-                if current_time - last_written_time >= 1:
+                if current_time - last_written_time >= self.time_consume_data_buffer:
                     with self.data_lock:
                         if self.data_buffer:
                             # Write data to the file in CSV-compatible format
@@ -200,5 +202,5 @@ if __name__ == "__main__":
     db_path = 'data_comparison.db'
     topic = 'sensor_data'
 
-    processor = DataProcessor(kafka_conf, db_path, topic)
+    processor = DataProcessor(kafka_conf, db_path, topic ,5)
     processor.start()
